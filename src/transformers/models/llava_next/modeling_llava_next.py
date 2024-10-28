@@ -673,6 +673,8 @@ class LlavaNextForConditionalGeneration(LlavaNextPreTrainedModel, GenerationMixi
                 # if vision_feature_select_strategy == "default":
                 # elif vision_feature_select_strategy == "full":
                 #     expected_num_patches = height * width + 1
+                print(f'base_image_feature.shape[0]: {base_image_feature.shape[0]}')
+                print(f'expected_num_patches: {expected_num_patches}')
                 if expected_num_patches != base_image_feature.shape[0]:
                     raise ValueError("The number of patches is not consistent with the image size.")
 
