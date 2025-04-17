@@ -20,7 +20,13 @@ from typing import Dict, List, Optional, Tuple, Union
 import numpy as np
 
 from ...image_processing_utils import BaseImageProcessor, BatchFeature, get_size_dict
-from ...image_transforms import convert_to_rgb, get_resize_output_image_size, resize, to_channel_dimension_format
+from ...image_transforms import (
+    convert_to_rgb,
+    get_resize_output_image_size,
+    pad,
+    resize,
+    to_channel_dimension_format,
+)
 from ...image_utils import (
     OPENAI_CLIP_MEAN,
     OPENAI_CLIP_STD,
@@ -133,13 +139,12 @@ class MiniCPMOImageProcessor(BaseImageProcessor):
         size: Dict[str, int] = None,
         resample: PILImageResampling = PILImageResampling.BICUBIC,
         do_center_crop: bool = True,
-        crop_size: Dict[str, int] = None,
         do_rescale: bool = True,
+        patch_size: int = 14,
         rescale_factor: Union[int, float] = 1 / 255,
         do_normalize: bool = True,
         image_mean: Optional[Union[float, List[float]]] = None,
         image_std: Optional[Union[float, List[float]]] = None,
-        do_pad: Optional[bool] = True,
         do_convert_rgb: bool = True,
         **kwargs,
     ) -> None:
@@ -152,13 +157,12 @@ class MiniCPMOImageProcessor(BaseImageProcessor):
         self.size = size
         self.resample = resample
         self.do_center_crop = do_center_crop
-        self.crop_size = crop_size
+        self.patch_size = patch_size
         self.do_rescale = do_rescale
         self.rescale_factor = rescale_factor
         self.do_normalize = do_normalize
         self.image_mean = image_mean if image_mean is not None else OPENAI_CLIP_MEAN
         self.image_std = image_std if image_std is not None else OPENAI_CLIP_STD
-        self.do_pad = do_pad
         self.do_convert_rgb = do_convert_rgb
 
     # Copied from transformers.models.clip.image_processing_clip.CLIPImageProcessor.resize with CLIP->LLaVa
@@ -271,7 +275,7 @@ class MiniCPMOImageProcessor(BaseImageProcessor):
 
         return selected_grid
 
-    def get_image_patches(
+    def _get_image_patches(
         self,
         image: np.ndarray,
         size: tuple,
@@ -280,7 +284,6 @@ class MiniCPMOImageProcessor(BaseImageProcessor):
         data_format: ChannelDimension,
         input_data_format: ChannelDimension,
         max_slice_num: int = 9,
-        never_split: Optional[bool] = None,
     ) -> List[np.ndarray]:
         """
         Process an image with variable resolutions by dividing it into patches.
@@ -305,21 +308,19 @@ class MiniCPMOImageProcessor(BaseImageProcessor):
             List[np.array]: A list of NumPy arrays containing the processed image patches.
         """
 
-        image_size = get_image_size(image, channel_dim=input_data_format)
-        best_grid_pinpoint = self.find_best_grid_pinpoint(
-            image_size, size, max_slice_num=max_slice_num, never_split=False
-        )
+        image_size = get_image_size(image, input_data_format)
+        best_grid_pinpoint = self.find_best_grid_pinpoint(image_size, size, max_slice_num, never_split=False)
 
         resized_image = self._resize_for_patching(
             image, image_size, best_grid_pinpoint, size, resample, input_data_format, patch_size
         )
-        patches = divide_to_patches(resized_image, best_grid_pinpoint, input_data_format, data_format)
+        patches = divide_to_patches(resized_image, best_grid_pinpoint, input_data_format)
         patches = [
             to_channel_dimension_format(patch, channel_dim=data_format, input_channel_dim=input_data_format)
             for patch in patches
         ]
 
-        target_size = find_best_resize(image_size, size, patch_size)
+        target_size = find_best_resize(image_size, size, patch_size, allow_upscale=True)
         resized_original_image = resize(
             image,
             size=target_size,
@@ -335,8 +336,7 @@ class MiniCPMOImageProcessor(BaseImageProcessor):
     def _preprocess(
         self,
         images: ImageInput,
-        do_center_crop: Optional[bool] = None,
-        crop_size: Optional[int] = None,
+        patch_size: int = 14,
         do_rescale: Optional[bool] = None,
         rescale_factor: Optional[float] = None,
         do_normalize: Optional[bool] = None,
@@ -344,6 +344,7 @@ class MiniCPMOImageProcessor(BaseImageProcessor):
         image_std: Optional[Union[float, List[float]]] = None,
         data_format: Optional[ChannelDimension] = ChannelDimension.FIRST,
         input_data_format: Optional[Union[str, ChannelDimension]] = None,
+        **kwargs,
     ) -> np.ndarray:
         """
         Preprocess an image or batch of images. Copy of the `preprocess` method from `CLIPImageProcessor`.
@@ -360,10 +361,6 @@ class MiniCPMOImageProcessor(BaseImageProcessor):
             resample (`int`, *optional*, defaults to `self.resample`):
                 Resampling filter to use if resizing the image. This can be one of the enum `PILImageResampling`. Only
                 has an effect if `do_resize` is set to `True`.
-            do_center_crop (`bool`, *optional*, defaults to `self.do_center_crop`):
-                Whether to center crop the image.
-            crop_size (`Dict[str, int]`, *optional*, defaults to `self.crop_size`):
-                Size of the center crop. Only has an effect if `do_center_crop` is set to `True`.
             do_rescale (`bool`, *optional*, defaults to `self.do_rescale`):
                 Whether to rescale the image.
             rescale_factor (`float`, *optional*, defaults to `self.rescale_factor`):
@@ -389,11 +386,8 @@ class MiniCPMOImageProcessor(BaseImageProcessor):
         """
         images = make_list_of_images(images)
 
-        all_images = []
+        all_images, target_sizes = [], []
         for image in images:
-            if do_center_crop:
-                image = self.center_crop(image=image, size=crop_size, input_data_format=input_data_format)
-
             if do_rescale:
                 image = self.rescale(image=image, scale=rescale_factor, input_data_format=input_data_format)
 
@@ -402,13 +396,78 @@ class MiniCPMOImageProcessor(BaseImageProcessor):
                     image=image, mean=image_mean, std=image_std, input_data_format=input_data_format
                 )
 
-            all_images.append(image)
-        images = [
-            to_channel_dimension_format(image, data_format, input_channel_dim=input_data_format)
-            for image in all_images
-        ]
+            image = to_channel_dimension_format(image, data_format, input_channel_dim=input_data_format)
 
-        return images
+            height, width = get_image_size(image, data_format)
+            target_sizes.append((height // patch_size, width // patch_size))
+
+            # original is MiniCPMVImageProcessor.reshape_by_patch
+            if data_format == ChannelDimension.FIRST:
+                image = image.reshape(3, patch_size, -1)
+            else:
+                image = image.reshape(patch_size, -1, 3)
+
+            all_images.append(image)
+
+        return all_images, target_sizes
+
+    def _pad_for_batching(
+        self,
+        pixel_values: List[np.ndarray],
+        data_format: Optional[Union[str, ChannelDimension]] = None,
+        input_data_format: Optional[Union[str, ChannelDimension]] = None,
+    ):
+        """
+        Pads images on the `num_of_patches` dimension with zeros to form a batch of same number of patches.
+
+        Args:
+            pixel_values (`List[np.ndarray]`):
+                An array of pixel values of each images of shape (`batch_size`, `num_patches`, `image_in_3D`)
+            data_format (`str` or `ChannelDimension`, *optional*):
+                The channel dimension format for the output image. Can be one of:
+                    - `"channels_first"` or `ChannelDimension.FIRST`: image in (num_channels, height, width) format.
+                    - `"channels_last"` or `ChannelDimension.LAST`: image in (height, width, num_channels) format.
+                If unset, will use same as the input image.
+            input_data_format (`str` or `ChannelDimension`, *optional*):
+                The channel dimension format for the input image. Can be one of:
+                    - `"channels_first"` or `ChannelDimension.FIRST`: image in (num_channels, height, width) format.
+                    - `"channels_last"` or `ChannelDimension.LAST`: image in (height, width, num_channels) format.
+                If unset, will use the inferred format of the input image.
+
+        Returns:
+            List[`np.ndarray`]: The padded images.
+        """
+
+        if data_format == ChannelDimension.FIRST:
+            max_elem = max(pixel_value.shape[-1] for pixel_value in pixel_values)
+        else:
+            max_elem = max(pixel_value.shape[1] for pixel_value in pixel_values)
+
+        paded_pixel_values, masks = [], []
+        for pixel_value in pixel_values:
+            if data_format == ChannelDimension.FIRST:
+                pad_pos = ((0, 0), (0, max_elem - pixel_value.shape[-1]))
+            else:
+                pad_pos = ((0, max_elem - pixel_value.shape[1]), (0, 0))
+
+            paded_pixel_value = pad(
+                pixel_value,
+                padding=pad_pos,
+            )
+            mask = np.ones_like(paded_pixel_value)
+
+            if data_format == ChannelDimension.FIRST:
+                mask[:, :, pixel_value.shape[-1] :] = 0
+            else:
+                mask[:, pixel_value.shape[1] :, :] = 0
+
+            paded_pixel_values.append(paded_pixel_value)
+            masks.append(mask)
+
+        paded_pixel_values = np.stack(paded_pixel_values)
+        masks = np.stack(masks)
+
+        return paded_pixel_values, masks
 
     def preprocess(
         self,
@@ -416,34 +475,28 @@ class MiniCPMOImageProcessor(BaseImageProcessor):
         do_resize: Optional[bool] = None,
         size: Dict[str, int] = None,
         resample: Optional[PILImageResampling] = None,
-        do_center_crop: Optional[bool] = None,
-        crop_size: Optional[int] = None,
+        patch_size: Optional[Dict[str, int]] = None,
         do_rescale: Optional[bool] = None,
         rescale_factor: Optional[float] = None,
         do_normalize: Optional[bool] = None,
         image_mean: Optional[Union[float, List[float]]] = None,
         image_std: Optional[Union[float, List[float]]] = None,
-        do_pad: Optional[bool] = None,
         do_convert_rgb: Optional[bool] = None,
         return_tensors: Optional[Union[str, TensorType]] = None,
-        data_format: Optional[ChannelDimension] = ChannelDimension.FIRST,
+        data_format: ChannelDimension = ChannelDimension.FIRST,
         input_data_format: Optional[Union[str, ChannelDimension]] = None,
         max_slice_num: Optional[int] = 9,
-        never_split: Optional[bool] = None,
     ) -> BatchFeature:
         do_resize = do_resize if do_resize is not None else self.do_resize
         size = size if size is not None else self.size
         size = get_size_dict(size, param_name="size", default_to_square=False)
         resample = resample if resample is not None else self.resample
-        do_center_crop = do_center_crop if do_center_crop is not None else self.do_center_crop
-        crop_size = crop_size if crop_size is not None else self.crop_size
-        crop_size = get_size_dict(crop_size, param_name="crop_size", default_to_square=True)
+        patch_size = patch_size if patch_size is not None else self.patch_size
         do_rescale = do_rescale if do_rescale is not None else self.do_rescale
         rescale_factor = rescale_factor if rescale_factor is not None else self.rescale_factor
         do_normalize = do_normalize if do_normalize is not None else self.do_normalize
         image_mean = image_mean if image_mean is not None else self.image_mean
         image_std = image_std if image_std is not None else self.image_std
-        do_pad = do_pad if do_pad is not None else self.do_pad
         do_convert_rgb = do_convert_rgb if do_convert_rgb is not None else self.do_convert_rgb
 
         images = make_flat_list_of_images(images)
@@ -460,8 +513,6 @@ class MiniCPMOImageProcessor(BaseImageProcessor):
             do_normalize=do_normalize,
             image_mean=image_mean,
             image_std=image_std,
-            do_center_crop=do_center_crop,
-            crop_size=crop_size,
             do_resize=do_resize,
             size=size,
             resample=resample,
@@ -482,69 +533,48 @@ class MiniCPMOImageProcessor(BaseImageProcessor):
             # We assume that all images have the same channel dimension format.
             input_data_format = infer_channel_dimension_format(images[0])
 
-        pixel_values, image_sizes, target_sizes = [], [], []
+        pixel_values, target_sizes = [], []
         for image in images:
             # convert image into a list of patches
             # we intentially use the same data format as the input data format
-            image_patches = self.get_image_patches(
+            image_patches = self._get_image_patches(
                 image,
                 size=(size["shortest_edge"], size["shortest_edge"])
                 if "shortest_edge" in size
                 else (min(size["height"], size["width"]), min(size["height"], size["width"])),
-                patch_size=crop_size["height"],
+                patch_size=patch_size,
                 resample=resample,
                 data_format=input_data_format,
                 input_data_format=input_data_format,
                 max_slice_num=max_slice_num,
-                never_split=never_split,
             )
-            image_patches = self._preprocess(
-                image=image_patches,
-                do_resize=do_resize,
-                size=size,
-                resample=resample,
-                do_center_crop=do_center_crop,
-                crop_size=crop_size,
+            image_patches, patches_sizes = self._preprocess(
+                image_patches,
                 do_rescale=do_rescale,
                 rescale_factor=rescale_factor,
                 do_normalize=do_normalize,
                 image_mean=image_mean,
                 image_std=image_std,
-                do_pad=do_pad,
-                do_convert_rgb=do_convert_rgb,
                 data_format=data_format,
                 input_data_format=input_data_format,
             )
 
-        for image in images:
-            image = to_channel_dimension_format(image, data_format, input_channel_dim=input_data_format)
-            image_size = get_image_patches(image, channel_dim=input_data_format)
+            pixel_values.extend(image_patches)
+            target_sizes.extend(patches_sizes)
 
-            for image in _images:
-                image_patches = self.get_sliced_images(image, max_slice_nums)
-                image_patches = [to_numpy_array(image).astype(np.float32) / 255 for image in image_patches]
-                image_patches = [
-                    self.normalize(image=image, mean=self.mean, std=self.std, input_data_format=input_data_format)
-                    for image in image_patches
-                ]
-                image_patches = [
-                    to_channel_dimension_format(image, ChannelDimension.FIRST, input_channel_dim=input_data_format)
-                    for image in image_patches
-                ]
-                for slice_image in image_patches:
-                    new_images.append(self.reshape_by_patch(slice_image))
-                    tgt_sizes.append(
-                        np.array((slice_image.shape[1] // self.patch_size, slice_image.shape[2] // self.patch_size))
-                    )
+        pixel_values, pixel_attention_mask = self._pad_for_batching(
+            pixel_values,
+            data_format=data_format,
+            input_data_format=input_data_format,
+        )
+        target_sizes = np.array(target_sizes)
 
-            if tgt_sizes:
-                tgt_sizes = np.vstack(tgt_sizes)
-
-            new_images_list.append(new_images)
-            image_sizes_list.append(image_sizes)
-            tgt_sizes_list.append(tgt_sizes)
         batch_feature = BatchFeature(
-            data={"pixel_values": new_images_list, "image_sizes": image_sizes_list, "target_sizes": tgt_sizes_list},
+            data={
+                "pixel_values": pixel_values,
+                "target_sizes": target_sizes,
+                "pixel_attention_mask": pixel_attention_mask,
+            },
             tensor_type=return_tensors,
         )
         return batch_feature
