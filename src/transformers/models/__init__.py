@@ -332,3 +332,14 @@ else:
 
     _file = globals()["__file__"]
     sys.modules[__name__] = _LazyModule(__name__, _file, define_import_structure(_file), module_spec=__spec__)
+
+# NOTE: To enhance development convenience and minimize conflicts caused by code changes in the main branch
+#       I will change it once all the code is completed.
+from ..utils import logging
+
+
+logger = logging.get_logger("transformers")
+logger.warning_once(
+    "To enhance development convenience and minimize conflicts caused by code changes in the main branch. I will change it once all the code is completed."
+)
+from .minicpm_o import *
