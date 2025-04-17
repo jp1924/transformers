@@ -281,3 +281,12 @@ class MiniCPMOConfig(PretrainedConfig):
         self.resampler_config = MiniCPMOResamplerConfig()
 
         super().__init__(**kwargs)
+
+
+__all__ = [
+    "MiniCPMOSpeechConfig",
+    "MiniCPMOResamplerConfig",
+    "MiniCPMOVisionConfig",
+    "MiniCPMOAudioConfig",
+    "MiniCPMOConfig",
+]

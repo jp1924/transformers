@@ -1075,8 +1075,8 @@ class MiniCPMOVisionModel(MiniCPMOVisionPreTrainedModel):
     def get_input_embeddings(self) -> nn.Module:
         return self.embeddings.patch_embedding
 
-    @add_start_docstrings_to_model_forward(SIGLIP_VISION_INPUTS_DOCSTRING)
-    @replace_return_docstrings(output_type=BaseModelOutputWithPooling, config_class=MiniCPMOVisionConfig)
+    # @add_start_docstrings_to_model_forward(SIGLIP_VISION_INPUTS_DOCSTRING)
+    # @replace_return_docstrings(output_type=BaseModelOutputWithPooling, config_class=MiniCPMOVisionConfig)
     def forward(
         self,
         pixel_values,
@@ -1431,3 +1431,11 @@ class MiniCPMOForConditionalGeneration(MiniCPMOPreTrainedModel):
         )
 
         image_features = self.get_image_features(pixel_values, pixel_attention_mask, target_sizes)
+
+
+__all__ = [
+    "MiniCPMOForConditionalGeneration",
+    "MiniCPMOMultiModalResampler",
+    "MiniCPMOVisionModel",
+    "MiniCPMOAudioEncoder",
+]

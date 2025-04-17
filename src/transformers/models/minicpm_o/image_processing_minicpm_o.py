@@ -588,3 +588,6 @@ class MiniCPMOImageProcessor(BaseImageProcessor):
             tensor_type=return_tensors,
         )
         return batch_feature
+
+
+__all__ = ["MiniCPMOImageProcessor"]
