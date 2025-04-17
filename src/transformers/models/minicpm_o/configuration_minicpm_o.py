@@ -12,7 +12,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 from typing import Optional, Tuple, Union
 
 from transformers import PretrainedConfig
@@ -95,8 +94,8 @@ class MiniCPMOSpeechConfig(PretrainedConfig):
 class MiniCPMOResamplerConfig(PretrainedConfig):
     def __init__(
         self,
-        adaptive: bool = True,
-        hidden_size: int = 3584,
+        lpm_hidden_size: int = 3584,
+        vpm_hidden_size: int = 1152,
         num_query_tokens: int = 64,
         pos_max_size: Tuple[int, int] = (70, 70),
         **kwargs,
@@ -104,8 +103,9 @@ class MiniCPMOResamplerConfig(PretrainedConfig):
         super().__init__(**kwargs)
 
         self.num_query_tokens = num_query_tokens
-        self.hidden_size = hidden_size
-        self.num_attention_heads = hidden_size // 128
+        self.lpm_hidden_size = lpm_hidden_size
+        self.vpm_hidden_size = vpm_hidden_size
+        self.num_attention_heads = lpm_hidden_size // 128
         self.adaptive = adaptive
         self.pos_max_size = pos_max_size
 
