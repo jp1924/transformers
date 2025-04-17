@@ -28,8 +28,6 @@ from ...image_transforms import (
     to_channel_dimension_format,
 )
 from ...image_utils import (
-    OPENAI_CLIP_MEAN,
-    OPENAI_CLIP_STD,
     ChannelDimension,
     ImageInput,
     PILImageResampling,
@@ -161,8 +159,8 @@ class MiniCPMOImageProcessor(BaseImageProcessor):
         self.do_rescale = do_rescale
         self.rescale_factor = rescale_factor
         self.do_normalize = do_normalize
-        self.image_mean = image_mean if image_mean is not None else OPENAI_CLIP_MEAN
-        self.image_std = image_std if image_std is not None else OPENAI_CLIP_STD
+        self.image_mean = image_mean if image_mean is not None else [0.5, 0.5, 0.5]
+        self.image_std = image_std if image_std is not None else [0.5, 0.5, 0.5]
         self.do_convert_rgb = do_convert_rgb
 
     # Copied from transformers.models.clip.image_processing_clip.CLIPImageProcessor.resize with CLIP->LLaVa
@@ -246,10 +244,9 @@ class MiniCPMOImageProcessor(BaseImageProcessor):
 
         log_ratio = math.log(original_width / original_height)
         multiple = min(math.ceil(original_width * original_height / (size[0] * size[1])), max_slice_num)
-        best_resolution = None
 
         if multiple <= 1 or never_split:
-            return best_resolution
+            return [1, 1]
 
         candidate_split_grids_nums = []
         for i in [multiple - 1, multiple, multiple + 1]:
@@ -314,11 +311,13 @@ class MiniCPMOImageProcessor(BaseImageProcessor):
         resized_image = self._resize_for_patching(
             image, image_size, best_grid_pinpoint, size, resample, input_data_format, patch_size
         )
+        if best_grid_pinpoint == [1, 1]:
+            resized_image = to_channel_dimension_format(
+                resized_image, channel_dim=data_format, input_channel_dim=input_data_format
+            )
+            return [resized_image]
+
         patches = divide_to_patches(resized_image, best_grid_pinpoint, input_data_format)
-        patches = [
-            to_channel_dimension_format(patch, channel_dim=data_format, input_channel_dim=input_data_format)
-            for patch in patches
-        ]
 
         target_size = find_best_resize(image_size, size, patch_size, allow_upscale=True)
         resized_original_image = resize(
@@ -330,6 +329,10 @@ class MiniCPMOImageProcessor(BaseImageProcessor):
         )
 
         image_patches = [resized_original_image] + patches
+        image_patches = [
+            to_channel_dimension_format(patch, channel_dim=data_format, input_channel_dim=input_data_format)
+            for patch in image_patches
+        ]
 
         return image_patches
 
@@ -399,15 +402,19 @@ class MiniCPMOImageProcessor(BaseImageProcessor):
             image = to_channel_dimension_format(image, data_format, input_channel_dim=input_data_format)
 
             height, width = get_image_size(image, data_format)
-            target_sizes.append((height // patch_size, width // patch_size))
+
+            patches_height = height // patch_size
+            patches_width = width // patch_size
+
+            target_sizes.append((patches_height, patches_width))
 
             # original is MiniCPMVImageProcessor.reshape_by_patch
-            if data_format == ChannelDimension.FIRST:
-                image = image.reshape(3, patch_size, -1)
-            else:
-                image = image.reshape(patch_size, -1, 3)
 
-            all_images.append(image)
+            reshaped = image.reshape(3, patches_height, patch_size, patches_width, patch_size)
+            transposed = np.transpose(reshaped, (0, 2, 1, 3, 4))
+            patches = transposed.reshape(3, patch_size, -1)
+
+            all_images.append(patches)
 
         return all_images, target_sizes
 
@@ -521,7 +528,7 @@ class MiniCPMOImageProcessor(BaseImageProcessor):
         if do_convert_rgb:
             images = [convert_to_rgb(image) for image in images]
 
-        images = [to_numpy_array(image) for image in images]
+        images = [to_numpy_array(image) / 255 for image in images]
 
         if do_rescale and is_scaled_image(images[0]):
             logger.warning_once(
@@ -548,6 +555,9 @@ class MiniCPMOImageProcessor(BaseImageProcessor):
                 input_data_format=input_data_format,
                 max_slice_num=max_slice_num,
             )
+
+            image_patches
+
             image_patches, patches_sizes = self._preprocess(
                 image_patches,
                 do_rescale=do_rescale,
