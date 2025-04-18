@@ -842,8 +842,8 @@ class MiniCPMOVisionEmbedding(nn.Module):
     def forward(
         self,
         pixel_values: torch.FloatTensor,
-        patch_attention_mask: torch.BoolTensor,
-        tgt_sizes: Optional[torch.IntTensor] = None,
+        pixel_attention_mask: torch.BoolTensor,
+        target_sizes: Optional[torch.IntTensor] = None,
     ) -> torch.Tensor:
         batch_size = pixel_values.size(0)
 
@@ -861,10 +861,10 @@ class MiniCPMOVisionEmbedding(nn.Module):
             fill_value=0,
         )
 
-        for batch_idx, p_attn_mask in enumerate(patch_attention_mask):
-            if tgt_sizes is not None:
-                nb_patches_h = tgt_sizes[batch_idx][0]
-                nb_patches_w = tgt_sizes[batch_idx][1]
+        for batch_idx, p_attn_mask in enumerate(pixel_attention_mask):
+            if target_sizes is not None:
+                nb_patches_h = target_sizes[batch_idx][0]
+                nb_patches_w = target_sizes[batch_idx][1]
             else:
                 nb_patches_h = p_attn_mask[:, 0].sum()
                 nb_patches_w = p_attn_mask[0].sum()
@@ -976,6 +976,7 @@ class MiniCPMOVisionEncoderLayer(nn.Module):
         super().__init__()
         self.embed_dim = config.hidden_size
         self.self_attn = MiniCPMOVisionAttention(config, layer_idx)
+
         self.layer_norm1 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
         self.mlp = MiniCPMOVisionMLP(config)
         self.layer_norm2 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
@@ -1128,8 +1129,8 @@ class MiniCPMOVisionModel(MiniCPMOVisionPreTrainedModel):
     def forward(
         self,
         pixel_values,
-        patch_attention_mask: Optional[torch.BoolTensor] = None,
-        tgt_sizes: Optional[torch.IntTensor] = None,
+        pixel_attention_mask: Optional[torch.BoolTensor] = None,
+        target_sizes: Optional[torch.IntTensor] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
@@ -1141,8 +1142,8 @@ class MiniCPMOVisionModel(MiniCPMOVisionPreTrainedModel):
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         batch_size = pixel_values.size(0)
-        if patch_attention_mask is None:
-            patch_attention_mask = torch.ones(
+        if pixel_attention_mask is None:
+            pixel_attention_mask = torch.ones(
                 size=(
                     batch_size,
                     pixel_values.size(2) // self.config.patch_size,
@@ -1153,20 +1154,20 @@ class MiniCPMOVisionModel(MiniCPMOVisionPreTrainedModel):
             )
 
         hidden_states = self.embeddings(
-            pixel_values=pixel_values, patch_attention_mask=patch_attention_mask, tgt_sizes=tgt_sizes
+            pixel_values=pixel_values, pixel_attention_mask=pixel_attention_mask, target_sizes=target_sizes
         )
 
-        patch_attention_mask = patch_attention_mask.view(batch_size, -1)
+        pixel_attention_mask = pixel_attention_mask.view(batch_size, -1)
         # The call to `_upad_input` in `_flash_attention_forward` is expensive
-        # So when the `patch_attention_mask` is full of 1s (i.e. attending to the whole sequence),
+        # So when the `pixel_attention_mask` is full of 1s (i.e. attending to the whole sequence),
         # avoiding passing the attention_mask, which is equivalent to attending to the full sequence
-        if not torch.any(~patch_attention_mask):
+        if not torch.any(~pixel_attention_mask):
             attention_mask = None
         else:
             attention_mask = (
-                _prepare_4d_attention_mask(patch_attention_mask, hidden_states.dtype)
-                if not self._use_flash_attention_2
-                else patch_attention_mask
+                _prepare_4d_attention_mask(pixel_attention_mask, hidden_states.dtype)
+                if not self.config._attn_implementation == "flash_attention_2"
+                else pixel_attention_mask
             )
 
         encoder_outputs = self.encoder(
