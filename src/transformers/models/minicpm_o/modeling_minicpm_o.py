@@ -158,6 +158,54 @@ class MiniCPMOChatTTSModel(PreTrainedModel):
 #######################
 
 
+def sinusoids(length: int, channels: int, max_timescale: float = 10000) -> torch.Tensor:
+    """Returns sinusoids for positional embedding"""
+    if channels % 2 != 0:
+        raise ValueError(
+            f"Number of channels has to be divisible by 2 for sinusoidal positional embeddings, got {channels} channels."
+        )
+    log_timescale_increment = math.log(max_timescale) / (channels // 2 - 1)
+    inv_timescales = torch.exp(-log_timescale_increment * torch.arange(channels // 2))
+    scaled_time = torch.arange(length).view(-1, 1) * inv_timescales.view(1, -1)
+    return torch.cat([scaled_time.sin(), scaled_time.cos()], dim=1)
+
+
+class MiniCPMOAudioPreTrainedModel(PreTrainedModel):
+    config_class = MiniCPMOAudioConfig
+    base_model_prefix = "model"
+    main_input_name = "input_features"
+    supports_gradient_checkpointing = True
+    _no_split_modules = ["MiniCPMOAudioEncoderLayer"]
+    _supports_flash_attn_2 = True
+    _supports_sdpa = True
+    _supports_cache_class = True
+    _supports_static_cache = True
+
+    def _init_weights(self, module):
+        std = self.config.initializer_range
+        if isinstance(module, (nn.Linear, nn.Conv1d)):
+            module.weight.data.normal_(mean=0.0, std=std)
+            if module.bias is not None:
+                module.bias.data.zero_()
+        elif isinstance(module, nn.Embedding):
+            module.weight.data.normal_(mean=0.0, std=std)
+            if module.padding_idx is not None:
+                module.weight.data[module.padding_idx].zero_()
+        elif isinstance(module, nn.LayerNorm):
+            module.weight.data.fill_(1.0)
+            module.bias.data.zero_()
+        elif isinstance(module, MiniCPMOAudioEncoder):
+            module.embed_positions.weight.copy_(sinusoids(*module.embed_positions.weight.shape))
+
+    def _get_feat_extract_output_lengths(self, input_lengths: torch.LongTensor):
+        """
+        Computes the output length of the convolutional layers
+        """
+        input_lengths = (input_lengths - 1) // 2 + 1
+
+        return input_lengths
+
+
 def audio_eager_attention_forward(
     module: nn.Module,
     query: torch.Tensor,
@@ -332,7 +380,7 @@ class MiniCPMOAudioEncoderLayer(nn.Module):
         return outputs
 
 
-class MiniCPMOAudioEncoder(nn.Module):
+class MiniCPMOAudioEncoder(MiniCPMOAudioPreTrainedModel):
     def __init__(self, config: MiniCPMOAudioConfig):
         super().__init__(config)
         self.config = config
@@ -1178,9 +1226,66 @@ def resampler_eager_attention_forward(
 class MiniCPMOMultiModalResamplerAttention(nn.Module):
     def __init__(self, config: MiniCPMOResamplerConfig):
         super().__init__()
+        self.config = config
+        self.embed_dim = config.lpm_hidden_size
+        self.num_heads = config.num_attention_heads
+        self.head_dim = self.embed_dim // self.num_heads
+        if self.head_dim * self.num_heads != self.embed_dim:
+            raise ValueError(
+                f"embed_dim must be divisible by num_heads (got `embed_dim`: {self.embed_dim} and `num_heads`:"
+                f" {self.num_heads})."
+            )
+        self.scale = self.head_dim**-0.5
+        self.dropout = config.attention_dropout
+        self.is_causal = False
 
-        # rewrite out_proj layer，with nn.Linear
-        self.out_proj = nn.Linear(embed_dim, embed_dim, bias=bias, device=device, dtype=dtype)
+        self.out_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=True)
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        encoder_hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        output_attentions: Optional[bool] = False,
+        **kwargs: Unpack[FlashAttentionKwargs],
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """Input shape: Batch x Time x Channel"""
+
+        batch_size, seq_length, embed_dim = hidden_states.shape
+
+        queries = hidden_states.view(batch_size, self.num_heads, self.head_dim, -1)
+        keys = encoder_hidden_states.view(batch_size, self.num_heads, self.head_dim, -1)
+        values = encoder_hidden_states.view(batch_size, self.num_heads, self.head_dim, -1)
+
+        attention_interface: Callable = resampler_eager_attention_forward
+        if self.config._attn_implementation != "eager":
+            if self.config._attn_implementation == "sdpa" and output_attentions:
+                logger.warning_once(
+                    "`torch.nn.functional.scaled_dot_product_attention` does not support `output_attentions=True`. Falling back to "
+                    'eager attention. This warning can be removed using the argument `attn_implementation="eager"` when loading the model.'
+                )
+            else:
+                attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
+
+        attn_output, attn_weights = attention_interface(
+            self,
+            queries,
+            keys,
+            values,
+            attention_mask,
+            is_causal=self.is_causal,
+            scaling=self.scale,
+            dropout=0.0 if not self.training else self.dropout,
+            **kwargs,
+        )
+
+        attn_output = attn_output.reshape(batch_size, seq_length, embed_dim).contiguous()
+        attn_output = self.out_proj(attn_output)
+
+        if not output_attentions:
+            attn_weights = None
+
+        return attn_output, attn_weights
 
 
 class MiniCPMOMultiModalResampler(nn.Module):
@@ -1211,7 +1316,7 @@ class MiniCPMOMultiModalResampler(nn.Module):
             (config.lpm_hidden_size**-0.5) * torch.randn(config.lpm_hidden_size, config.lpm_hidden_size)
         )
 
-        self._set_2d_pos_cache(self.max_size)
+        # self._set_2d_pos_cache(self.max_size)
 
     def _set_2d_pos_cache(self, max_size, device="cpu"):
         if is_deepspeed_zero3_enabled():
@@ -1226,7 +1331,7 @@ class MiniCPMOMultiModalResampler(nn.Module):
             self.max_size = [max(max_h, self.max_size[0]), max(max_w, self.max_size[1])]
             self._set_2d_pos_cache(self.max_size, device)
 
-    def forward(self, image_features: torch.Tensor, tgt_sizes: torch.IntTensor) -> torch.Tensor:
+    def forward(self, image_features: torch.Tensor, attention_mask: torch.FloatTensor) -> torch.Tensor:
         assert image_features.shape[0] == tgt_sizes.shape[0]
         bs = image_features.shape[0]
 

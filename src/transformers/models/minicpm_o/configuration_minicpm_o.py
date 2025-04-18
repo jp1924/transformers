@@ -97,6 +97,8 @@ class MiniCPMOResamplerConfig(PretrainedConfig):
         lpm_hidden_size: int = 3584,
         vpm_hidden_size: int = 1152,
         num_query_tokens: int = 64,
+        num_attention_heads: int = 128,
+        attention_dropout: float = 0.0,
         pos_max_size: Tuple[int, int] = (70, 70),
         **kwargs,
     ):
@@ -105,8 +107,8 @@ class MiniCPMOResamplerConfig(PretrainedConfig):
         self.num_query_tokens = num_query_tokens
         self.lpm_hidden_size = lpm_hidden_size
         self.vpm_hidden_size = vpm_hidden_size
-        self.num_attention_heads = lpm_hidden_size // 128
-        self.adaptive = adaptive
+        self.num_attention_heads = num_attention_heads
+        self.attention_dropout = attention_dropout
         self.pos_max_size = pos_max_size
 
 
@@ -164,6 +166,7 @@ class MiniCPMOAudioConfig(PretrainedConfig):
         num_hidden_layers: int = 24,  # encoder_layers
         num_mel_bins: int = 80,
         scale_embedding: bool = False,
+        initializer_range=0.02,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -180,6 +183,7 @@ class MiniCPMOAudioConfig(PretrainedConfig):
         self.hidden_size = hidden_size
         self.num_attention_heads = num_attention_heads
         self.max_source_positions = max_source_positions
+        self.initializer_range = initializer_range
 
 
 class MiniCPMOConfig(PretrainedConfig):
@@ -191,41 +195,34 @@ class MiniCPMOConfig(PretrainedConfig):
     def __init__(
         self,
         text_config: Union[str, dict, PretrainedConfig],
-        audio_chunk_length=1.0,
         audio_config: Optional[Union[str, dict, PretrainedConfig]] = None,
+        resampler_config: Optional[Union[str, dict, PretrainedConfig]] = None,
+        speech_config: Optional[Union[str, dict, PretrainedConfig]] = None,
+        vision_config: Optional[Union[str, dict, PretrainedConfig]] = None,
+        audio_chunk_length=1.0,
         audio_pool_step=2,
-        batch_vision_input=True,
-        drop_vision_last_layer=True,
         image_size=448,
         max_slice_nums=9,
         patch_slice_size=14,
         query_num=64,
-        resampler_config: Optional[Union[str, dict, PretrainedConfig]] = None,
         scale_resolution=448,
-        speech_config: Optional[Union[str, dict, PretrainedConfig]] = None,
         stream_input=False,
-        use_cache=True,
         use_image_id=True,
-        vision_batch_size=16,
-        vision_config: Optional[Union[str, dict, PretrainedConfig]] = None,
+        initializer_range=0.02,
         **kwargs,
     ):
         # MiniCPM-V specific
         self.patch_slice_size = patch_slice_size
         self.max_slice_nums = max_slice_nums
         self.scale_resolution = scale_resolution
-        # MiniCPM-V specific
-
-        self.use_cache = use_cache
         self.query_num = query_num
         self.image_size = image_size
-        self.drop_vision_last_layer = drop_vision_last_layer
-        self.batch_vision_input = batch_vision_input
         self.use_image_id = use_image_id
-        self.vision_batch_size = vision_batch_size
         self.audio_pool_step = audio_pool_step
         self.audio_chunk_length = audio_chunk_length
         self.stream_input = stream_input
+        self.initializer_range = initializer_range
+        # MiniCPM-V specific
 
         if isinstance(text_config, str):
             self.text_config = AutoConfig.from_pretrained(text_config)
@@ -278,7 +275,20 @@ class MiniCPMOConfig(PretrainedConfig):
         else:
             self.speech_config = None
 
-        self.resampler_config = MiniCPMOResamplerConfig()
+        if self.vision_config is not None:
+            if isinstance(resampler_config, PretrainedConfig):
+                self.resampler_config = resampler_config
+            elif isinstance(speech_config, dict):
+                self.resampler_config = MiniCPMOResamplerConfig.from_dict(resampler_config)
+
+            if self.resampler_config.vpm_hidden_size != self.vision_config.hidden_size:
+                raise ValueError(
+                    f"resampler_config.vpm_hidden_size {self.resampler_config.vpm_hidden_size} should be equal to vision_config.hidden_size {self.vision_config.hidden_size}"
+                )
+            if self.resampler_config.lpm_hidden_size != self.text_config.hidden_size:
+                raise ValueError(
+                    f"resampler_config.lpm_hidden_size {self.resampler_config.lpm_hidden_size} should be equal to text_config.hidden_size {self.text_config.hidden_size}"
+                )
 
         super().__init__(**kwargs)
 

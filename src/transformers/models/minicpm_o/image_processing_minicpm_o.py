@@ -421,55 +421,37 @@ class MiniCPMOImageProcessor(BaseImageProcessor):
     def _pad_for_batching(
         self,
         pixel_values: List[np.ndarray],
+        target_sizes: List[Tuple[int, int]],
         data_format: Optional[Union[str, ChannelDimension]] = None,
         input_data_format: Optional[Union[str, ChannelDimension]] = None,
     ):
-        """
-        Pads images on the `num_of_patches` dimension with zeros to form a batch of same number of patches.
-
-        Args:
-            pixel_values (`List[np.ndarray]`):
-                An array of pixel values of each images of shape (`batch_size`, `num_patches`, `image_in_3D`)
-            data_format (`str` or `ChannelDimension`, *optional*):
-                The channel dimension format for the output image. Can be one of:
-                    - `"channels_first"` or `ChannelDimension.FIRST`: image in (num_channels, height, width) format.
-                    - `"channels_last"` or `ChannelDimension.LAST`: image in (height, width, num_channels) format.
-                If unset, will use same as the input image.
-            input_data_format (`str` or `ChannelDimension`, *optional*):
-                The channel dimension format for the input image. Can be one of:
-                    - `"channels_first"` or `ChannelDimension.FIRST`: image in (num_channels, height, width) format.
-                    - `"channels_last"` or `ChannelDimension.LAST`: image in (height, width, num_channels) format.
-                If unset, will use the inferred format of the input image.
-
-        Returns:
-            List[`np.ndarray`]: The padded images.
-        """
+        """ """
 
         if data_format == ChannelDimension.FIRST:
-            max_elem = max(pixel_value.shape[-1] for pixel_value in pixel_values)
+            pixel_max_elem = max(pixel_value.shape[-1] for pixel_value in pixel_values)
         else:
-            max_elem = max(pixel_value.shape[1] for pixel_value in pixel_values)
+            pixel_max_elem = max(pixel_value.shape[1] for pixel_value in pixel_values)
+        target_sizes = [np.prod(target_size) for target_size in target_sizes]
+
+        feat_max_elem = max(target_sizes)
 
         paded_pixel_values, masks = [], []
-        for pixel_value in pixel_values:
+        for pixel_value, target_size in zip(pixel_values, target_sizes):
             if data_format == ChannelDimension.FIRST:
-                pad_pos = ((0, 0), (0, max_elem - pixel_value.shape[-1]))
+                pad_pos = ((0, 0), (0, pixel_max_elem - pixel_value.shape[-1]))
             else:
-                pad_pos = ((0, max_elem - pixel_value.shape[1]), (0, 0))
+                pad_pos = ((0, pixel_max_elem - pixel_value.shape[1]), (0, 0))
 
             paded_pixel_value = pad(
                 pixel_value,
                 padding=pad_pos,
             )
-            mask = np.ones_like(paded_pixel_value)
 
-            if data_format == ChannelDimension.FIRST:
-                mask[:, :, pixel_value.shape[-1] :] = 0
-            else:
-                mask[:, pixel_value.shape[1] :, :] = 0
+            attention_mask = np.zeros((1, feat_max_elem))
+            attention_mask[:, :target_size] = True
 
             paded_pixel_values.append(paded_pixel_value)
-            masks.append(mask)
+            masks.append(attention_mask)
 
         paded_pixel_values = np.stack(paded_pixel_values)
         masks = np.stack(masks)
@@ -572,12 +554,13 @@ class MiniCPMOImageProcessor(BaseImageProcessor):
             pixel_values.extend(image_patches)
             target_sizes.extend(patches_sizes)
 
+        target_sizes = np.array(target_sizes)
         pixel_values, pixel_attention_mask = self._pad_for_batching(
             pixel_values,
+            target_sizes,
             data_format=data_format,
             input_data_format=input_data_format,
         )
-        target_sizes = np.array(target_sizes)
 
         batch_feature = BatchFeature(
             data={
