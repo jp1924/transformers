@@ -194,7 +194,7 @@ class MiniCPMOConfig(PretrainedConfig):
 
     def __init__(
         self,
-        text_config: Union[str, dict, PretrainedConfig],
+        text_config: Optional[Union[str, dict, PretrainedConfig]] = None,
         audio_config: Optional[Union[str, dict, PretrainedConfig]] = None,
         resampler_config: Optional[Union[str, dict, PretrainedConfig]] = None,
         speech_config: Optional[Union[str, dict, PretrainedConfig]] = None,
@@ -225,70 +225,74 @@ class MiniCPMOConfig(PretrainedConfig):
         # MiniCPM-V specific
 
         if isinstance(text_config, str):
-            self.text_config = AutoConfig.from_pretrained(text_config)
+            text_config = AutoConfig.from_pretrained(text_config)
         elif isinstance(text_config, PretrainedConfig):
-            self.text_config = text_config
+            text_config = text_config
         elif isinstance(text_config, dict):
-            self.text_config = CONFIG_MAPPING[text_config.pop("model_type")].from_dict(text_config)
+            text_config = CONFIG_MAPPING[text_config.pop("model_type")].from_dict(text_config)
         else:
-            raise ValueError(
-                "text_config should be a string, PretrainedConfig or dict, but got {}".format(type(text_config))
-            )
+            text_config = CONFIG_MAPPING["qwen2"]()
 
         # same as HuggingFaceM4/siglip-so400m-14-980-flash-attn2-navit add tgt_sizes
         if isinstance(vision_config, str):
-            self.vision_config = AutoConfig.from_pretrained(vision_config)
+            vision_config = AutoConfig.from_pretrained(vision_config)
         elif isinstance(vision_config, PretrainedConfig):
-            self.vision_config = vision_config
+            vision_config = vision_config
         elif isinstance(vision_config, dict):
             vision_model_type = vision_config.pop("model_type")
             if vision_model_type == "minicpm_o_vision_model":
-                self.vision_config = MiniCPMOVisionConfig.from_dict(vision_config)
+                vision_config = MiniCPMOVisionConfig.from_dict(vision_config)
             else:
-                self.vision_config = CONFIG_MAPPING[vision_model_type].from_dict(vision_config)
+                vision_config = CONFIG_MAPPING[vision_model_type].from_dict(vision_config)
         else:
-            self.vision_config = None
+            vision_config = None
 
         if isinstance(audio_config, str):
-            self.audio_config = AutoConfig.from_pretrained(audio_config)
+            audio_config = AutoConfig.from_pretrained(audio_config)
         elif isinstance(audio_config, PretrainedConfig):
-            self.audio_config = audio_config
+            audio_config = audio_config
         elif isinstance(audio_config, dict):
             audio_model_type = audio_config.pop("model_type")
             if audio_model_type == "minicpm_o_audio_model":
-                self.audio_config = MiniCPMOAudioConfig.from_dict(audio_config)
+                audio_config = MiniCPMOAudioConfig.from_dict(audio_config)
             else:
-                self.audio_config = CONFIG_MAPPING[audio_model_type].from_dict(audio_config)
+                audio_config = CONFIG_MAPPING[audio_model_type].from_dict(audio_config)
         else:
-            self.audio_config = None
+            audio_config = None
 
         if isinstance(speech_config, str):
-            self.speech_config = AutoConfig.from_pretrained(speech_config)
+            speech_config = AutoConfig.from_pretrained(speech_config)
         elif isinstance(speech_config, PretrainedConfig):
-            self.speech_config = speech_config
+            speech_config = speech_config
         elif isinstance(speech_config, dict):
             speech_model_type = speech_config.pop("model_type")
             if speech_model_type == "minicpm_o_speech_model":
-                self.speech_config = MiniCPMOSpeechConfig.from_dict(speech_config)
+                speech_config = MiniCPMOSpeechConfig.from_dict(speech_config)
             else:
-                self.speech_config = CONFIG_MAPPING[speech_model_type].from_dict(speech_config)
+                speech_config = CONFIG_MAPPING[speech_model_type].from_dict(speech_config)
         else:
-            self.speech_config = None
+            speech_config = None
 
-        if self.vision_config is not None:
+        if vision_config is not None:
             if isinstance(resampler_config, PretrainedConfig):
-                self.resampler_config = resampler_config
-            elif isinstance(speech_config, dict):
-                self.resampler_config = MiniCPMOResamplerConfig.from_dict(resampler_config)
+                resampler_config = resampler_config
+            elif isinstance(resampler_config, dict):
+                resampler_config = MiniCPMOResamplerConfig.from_dict(resampler_config)
 
-            if self.resampler_config.vpm_hidden_size != self.vision_config.hidden_size:
+            if resampler_config.vpm_hidden_size != vision_config.hidden_size:
                 raise ValueError(
-                    f"resampler_config.vpm_hidden_size {self.resampler_config.vpm_hidden_size} should be equal to vision_config.hidden_size {self.vision_config.hidden_size}"
+                    f"resampler_config.vpm_hidden_size {resampler_config.vpm_hidden_size} should be equal to vision_config.hidden_size {vision_config.hidden_size}"
                 )
-            if self.resampler_config.lpm_hidden_size != self.text_config.hidden_size:
+            if resampler_config.lpm_hidden_size != text_config.hidden_size:
                 raise ValueError(
-                    f"resampler_config.lpm_hidden_size {self.resampler_config.lpm_hidden_size} should be equal to text_config.hidden_size {self.text_config.hidden_size}"
+                    f"resampler_config.lpm_hidden_size {resampler_config.lpm_hidden_size} should be equal to text_config.hidden_size {text_config.hidden_size}"
                 )
+
+        self.text_config = text_config
+        self.audio_config = audio_config
+        self.speech_config = speech_config
+        self.vision_config = vision_config
+        self.resampler_config = resampler_config
 
         super().__init__(**kwargs)
 
